@@ -11,6 +11,13 @@
 #define MAGIC_NUMBER_SIZE 16
 
 typedef struct {
+    uint8_t magic[MAGIC_NUMBER_SIZE]; // 0–15
+    uint32_t nb_blocks;               // 16–19
+    uint32_t nb_inode_blocks;         // 20–23
+    uint32_t block_size;              // 24–27
+} SuperBlock;
+
+typedef struct {
     DISK disk;
     int is_mounted;
 
@@ -23,21 +30,10 @@ typedef struct {
 
 extern SSFS ssfs;
 
-
-typedef struct {
-    uint8_t magic[MAGIC_NUMBER_SIZE]; // 0–15
-    uint32_t nb_blocks;               // 16–19
-    uint32_t nb_inode_blocks;         // 20–23
-    uint32_t block_size;              // 24–27
-} SuperBlock;
-
 /// @brief Magic number used to identify the file system. It is stored in the superblock
 extern const uint8_t MAGIC_NUMBER[MAGIC_NUMBER_SIZE];
-/// @brief Offset of the number of blocks in the superblock
-extern const uint8_t OFFSET_NB_BLOCKS = 16;
-/// @brief Offset of the number of inode blocks in the superblock
-extern const uint8_t OFFSET_NB_INODE_BLOCKS = 20;
-/// @brief Offset of the block size in the superblock
-extern const uint8_t OFFSET_BLOCK_SIZE = 24;
+extern const uint8_t OFFSET_NB_BLOCKS;
+extern const uint8_t OFFSET_NB_INODE_BLOCKS;
+extern const uint8_t OFFSET_BLOCK_SIZE;
 
 #endif
