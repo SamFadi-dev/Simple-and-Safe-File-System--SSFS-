@@ -13,12 +13,17 @@
 #define INODE_DIRECT_OFFSET   8 // Offset for direct pointers in the inode structure
 #define INODE_INDIRECT1_OFFSET 24 // Offset for indirect1 pointer in the inode structure
 #define INODE_INDIRECT2_OFFSET 28 // Offset for indirect2 pointer in the inode structure
+#define BLOCK_POINTERS_SIZE 256 // Number of pointers in a block
 
 static uint8_t* get_inode(uint32_t inode_num, uint8_t *block_out);
 static int free_block(uint32_t block_num);
 static uint32_t allocate_block();
 static void clear_indirect_block(uint32_t block_num);
 static void clear_double_indirect_block(uint32_t block_num);
+
+//=============================================================================
+//========================== SSFS API FUNCTIONS ===============================
+//=============================================================================
 
 /// @brief formats, 
 /// that is, installs SSFS on, the virtual disk whose disk image is contained in file disk_name (as a c-style string). 
@@ -216,7 +221,7 @@ int read(int inode_num, uint8_t *data, int len, int offset)
         } 
 
         // Indirect 1 blocks
-        else if (file_block_index < 260) {
+        else if (file_block_index < BLOCK_POINTERS_SIZE + 4) {
             uint32_t indirect1;
             memcpy(&indirect1, inode + INODE_INDIRECT1_OFFSET, sizeof(uint32_t));
             if (indirect1 == 0) break;
@@ -239,9 +244,9 @@ int read(int inode_num, uint8_t *data, int len, int offset)
             if (vdisk_read(&ssfs.disk, indirect2, indirect2_block) != 0)
                 return -1;
 
-            int idx = file_block_index - 260;
-            int first_level = idx / 256;
-            int second_level = idx % 256;
+            int idx = file_block_index - BLOCK_POINTERS_SIZE + 4;
+            int first_level = idx / BLOCK_POINTERS_SIZE;
+            int second_level = idx % BLOCK_POINTERS_SIZE;
 
             uint32_t intermediate_block_num;
             memcpy(&intermediate_block_num, indirect2_block + 4 * first_level, sizeof(uint32_t));
@@ -315,7 +320,7 @@ int write(int inode_num, uint8_t *data, int len, int offset)
         }
 
         // Case 2: Indirect 1
-        else if (file_block_index < 260) {
+        else if (file_block_index < BLOCK_POINTERS_SIZE + 4) {
             uint32_t *indirect_ptr = (uint32_t *)(inode + INODE_INDIRECT1_OFFSET);
             if (*indirect_ptr == 0) {
                 *indirect_ptr = allocate_block();
@@ -330,9 +335,9 @@ int write(int inode_num, uint8_t *data, int len, int offset)
 
         // Case 3: Indirect 2
         else {
-            int idx = file_block_index - 260;
-            int outer = idx / 256;
-            int inner = idx % 256;
+            int idx = file_block_index - BLOCK_POINTERS_SIZE + 4;
+            int outer = idx / BLOCK_POINTERS_SIZE;
+            int inner = idx % BLOCK_POINTERS_SIZE;
 
             uint32_t *indirect2_ptr = (uint32_t *)(inode + INODE_INDIRECT2_OFFSET);
             if (*indirect2_ptr == 0) {
@@ -362,10 +367,10 @@ int write(int inode_num, uint8_t *data, int len, int offset)
             if (*data_block_ptr == 0) return -1;
 
             // Write updated indirect pointer if needed
-            if (file_block_index >= 4 && file_block_index < 260)
+            if (file_block_index >= 4 && file_block_index < BLOCK_POINTERS_SIZE + 4)
                 vdisk_write(&ssfs.disk, *(uint32_t *)(inode + INODE_INDIRECT1_OFFSET), indirect_block);
-            else if (file_block_index >= 260) {
-                int outer = (file_block_index - 260) / 256;
+            else if (file_block_index >= BLOCK_POINTERS_SIZE + 4) {
+                int outer = (file_block_index - BLOCK_POINTERS_SIZE + 4) / BLOCK_POINTERS_SIZE;
                 uint32_t *indirect2_ptr = (uint32_t *)(inode + INODE_INDIRECT2_OFFSET);
                 uint32_t *intermediate_ptr = (uint32_t *)(dbl_indirect_block + 4 * outer);
                 vdisk_write(&ssfs.disk, *intermediate_ptr, inner_indirect_block);
@@ -427,6 +432,10 @@ int create()
     return -1; // No free inode found
 }
 
+//=============================================================================
+//========================== SSFS STATIC FUNCTIONS ============================
+//=============================================================================
+
 /// @brief Gets the inode of a file.
 /// @param inode_num 
 /// @param block_out 
@@ -476,7 +485,7 @@ static void clear_indirect_block(uint32_t block_num)
 {
     uint8_t block[BLOCK_SIZE];
     if (vdisk_read(&ssfs.disk, block_num, block) != 0) return;
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < BLOCK_POINTERS_SIZE; i++) {
         uint32_t ptr;
         memcpy(&ptr, block + i * 4, sizeof(uint32_t));
         if (ptr != 0) {
@@ -492,7 +501,7 @@ static void clear_double_indirect_block(uint32_t block_num)
 {
     uint8_t outer[BLOCK_SIZE];
     if (vdisk_read(&ssfs.disk, block_num, outer) != 0) return;
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < BLOCK_POINTERS_SIZE; i++) {
         uint32_t indirect_block_num;
         memcpy(&indirect_block_num, outer + i * 4, sizeof(uint32_t));
         if (indirect_block_num != 0) {
