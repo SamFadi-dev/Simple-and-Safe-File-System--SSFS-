@@ -9,9 +9,6 @@ const uint8_t MAGIC_NUMBER[MAGIC_NUMBER_SIZE] = {
     0x39, 0x34, 0x30, 0x0f
 };
 
-/// @brief Offset of the number of blocks in the superblock
 const uint8_t OFFSET_NB_BLOCKS = 16;
-/// @brief Offset of the number of inode blocks in the superblock
 const uint8_t OFFSET_NB_INODE_BLOCKS = 20;
-/// @brief Offset of the block size in the superblock
 const uint8_t OFFSET_BLOCK_SIZE = 24;

@@ -40,7 +40,7 @@ int format(char *disk_name, int inodes)
 
     // Calculate the number of blocks needed for inodes and data
     uint32_t inode_blocks = (inodes + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK;
-    uint32_t total_blocks = 1 + inode_blocks + 1;  // 1 SuperBlock + i-nodes + 1 DataBlock
+    uint32_t total_blocks = 1 + inode_blocks + 100;  // 1 SuperBlock + i-nodes + 1 DataBlock
 
     SuperBlock *sb = &ssfs.superblock;
     memcpy(sb->magic, MAGIC_NUMBER, MAGIC_NUMBER_SIZE);
@@ -412,7 +412,7 @@ int create()
             return -1;
 
         if (inode[INODE_STATUT] != INODE_VALID) {
-            inode[INODE_STATUT] = INODE_VALID;
+            inode[INODE_STATUT] = (uint8_t)INODE_VALID;
             memset(inode + 1, 0, INODE_SIZE - 1);
 
             int block_index = inode_num / INODES_PER_BLOCK;
@@ -431,7 +431,8 @@ int create()
 /// @param inode_num 
 /// @param block_out 
 /// @return pointer to the inode in the block_out buffer
-static uint8_t* get_inode(uint32_t inode_num, uint8_t *block_out) {
+static uint8_t* get_inode(uint32_t inode_num, uint8_t *block_out) 
+{
     int block_index = inode_num / INODES_PER_BLOCK;
     int offset = inode_num % INODES_PER_BLOCK;
     int block_num = ssfs.inode_start_block + block_index;
@@ -445,14 +446,16 @@ static uint8_t* get_inode(uint32_t inode_num, uint8_t *block_out) {
 /// @brief Frees a block by writing zeros to it.
 /// @param block_num 
 /// @return 0 on success, -1 on error
-static int free_block(uint32_t block_num) {
+static int free_block(uint32_t block_num) 
+{
     uint8_t zero[BLOCK_SIZE] = {0};
     return vdisk_write(&ssfs.disk, block_num, zero);
 }
 
 /// @brief Allocates a free block by writing zeros to it.
 /// @return The block number of the allocated block, or 0 if no free block is found.
-static uint32_t allocate_block() {
+static uint32_t allocate_block() 
+{
     uint8_t block[BLOCK_SIZE];
     for (uint32_t i = ssfs.data_start_block; i < ssfs.superblock.nb_blocks; i++) {
         if (vdisk_read(&ssfs.disk, i, block) != 0) continue;
@@ -462,12 +465,15 @@ static uint32_t allocate_block() {
             return i;
         }
     }
-    return 0; // No free block found
+    printf("No free block available!\n"); // No free block found
+    return 0;
 }
+
 
 /// @brief Clears an indirect1 block by freeing all its data blocks.
 /// @param block_num 
-static void clear_indirect_block(uint32_t block_num) {
+static void clear_indirect_block(uint32_t block_num) 
+{
     uint8_t block[BLOCK_SIZE];
     if (vdisk_read(&ssfs.disk, block_num, block) != 0) return;
     for (int i = 0; i < 256; i++) {
@@ -482,7 +488,8 @@ static void clear_indirect_block(uint32_t block_num) {
 
 /// @brief Clears a indirect2 block by freeing all its data blocks.
 /// @param block_num 
-static void clear_double_indirect_block(uint32_t block_num) {
+static void clear_double_indirect_block(uint32_t block_num) 
+{
     uint8_t outer[BLOCK_SIZE];
     if (vdisk_read(&ssfs.disk, block_num, outer) != 0) return;
     for (int i = 0; i < 256; i++) {
