@@ -2,10 +2,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "vdisk.h"
+#include "include/vdisk.h"
 #include "fs.h"
 #include "ssfs.h"
-#include "error.h"
+#include "include/error.h"
 
 #define INODE_VALID 1 // Valid inode status
 #define INODE_STATUT 0 // Offset for inode status in the inode structure
@@ -14,12 +14,18 @@
 #define INODE_INDIRECT1_OFFSET 24 // Offset for indirect1 pointer in the inode structure
 #define INODE_INDIRECT2_OFFSET 28 // Offset for indirect2 pointer in the inode structure
 #define BLOCK_POINTERS_SIZE 256 // Number of pointers in a block
+#define DIRECT_BLOCK 4 // Direct block
+
+#define MAX_BLOCKS 10000
+char block_used[MAX_BLOCKS] = {0};
 
 static uint8_t* get_inode(uint32_t inode_num, uint8_t *block_out);
 static int free_block(uint32_t block_num);
 static uint32_t allocate_block();
 static void clear_indirect_block(uint32_t block_num);
 static void clear_double_indirect_block(uint32_t block_num);
+static uint32_t get_vdisk_size(DISK *disk);
+static void rebuild_block_usage_from_inodes();
 
 //=============================================================================
 //========================== SSFS API FUNCTIONS ===============================
@@ -45,8 +51,10 @@ int format(char *disk_name, int inodes)
 
     // Calculate the number of blocks needed for inodes and data
     uint32_t inode_blocks = (inodes + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK;
-    uint32_t total_blocks = 1 + inode_blocks + 100;  // 1 SuperBlock + i-nodes + 1 DataBlock
-
+    uint32_t total_blocks = get_vdisk_size(&ssfs.disk);
+    if (total_blocks <= 1 + inode_blocks)
+        return fs_EWRITE;
+    
     SuperBlock *sb = &ssfs.superblock;
     memcpy(sb->magic, MAGIC_NUMBER, MAGIC_NUMBER_SIZE);
     sb->nb_blocks = total_blocks;
@@ -57,18 +65,39 @@ int format(char *disk_name, int inodes)
     uint8_t block[BLOCK_SIZE] = {0};
     memcpy(block, sb, sizeof(SuperBlock));
     if (vdisk_write(&ssfs.disk, SUPERBLOCK_SECTOR, block) != 0)
-        return -1;
+        return fs_EWRITE;
+    
+    printf("format(): total_blocks = %u\n", total_blocks);
+
+    for (uint32_t i = 1; i < total_blocks; ++i) {
+        uint8_t check[BLOCK_SIZE];
+        if (vdisk_read(&ssfs.disk, i, check) != 0)
+            return fs_EREAD;
+    
+        for (int j = 0; j < BLOCK_SIZE; ++j) {
+            if (check[j] != 0) {
+                vdisk_off(&ssfs.disk);
+                return fs_EWRITE; // Don't format non-empty disk
+            }
+        }
+    }    
 
     // Erase the rest of the disk to 0
     memset(block, 0, BLOCK_SIZE);
     for (uint32_t i = 1; i < total_blocks; ++i) {
         if (vdisk_write(&ssfs.disk, i, block) != 0)
-            return -1;
+        {
+            printf("Failed to write block %u\n", i);
+            return fs_EWRITE;
+        }
     }
 
-    vdisk_sync(&ssfs.disk);
-    vdisk_off(&ssfs.disk);
+    memset(block_used, 0, sizeof(block_used));
 
+    if(vdisk_sync(&ssfs.disk) != 0)
+        return fs_ESYNC;
+
+    vdisk_off(&ssfs.disk);
     return 0;
 }
 
@@ -84,7 +113,7 @@ int stat(int inode_num)
     uint8_t inode_block[BLOCK_SIZE];
     uint8_t *inode = get_inode(inode_num, inode_block);
     if (!inode || inode[INODE_STATUT] != INODE_VALID)
-        return -1;
+        return fs_EREAD;
 
     uint32_t size;
     memcpy(&size, inode + INODE_SIZE_OFFSET, sizeof(uint32_t));
@@ -109,7 +138,7 @@ int mount(char *disk_name)
     uint8_t block[BLOCK_SIZE];
     if (vdisk_read(&ssfs.disk, SUPERBLOCK_SECTOR, block) != 0) {
         vdisk_off(&ssfs.disk);
-        return -1;
+        return fs_EREAD;
     }
 
     SuperBlock *sb = &ssfs.superblock;
@@ -127,6 +156,8 @@ int mount(char *disk_name)
     ssfs.data_start_block  = ssfs.inode_start_block + sb->nb_inode_blocks;
 
     ssfs.is_mounted = 1;
+    rebuild_block_usage_from_inodes();
+
     return 0;
 }
 
@@ -139,9 +170,11 @@ int unmount()
     if (!ssfs.is_mounted)
         return -1;
 
-    vdisk_sync(&ssfs.disk);
+    if(vdisk_sync(&ssfs.disk) != 0)
+        return fs_ESYNC;
     vdisk_off(&ssfs.disk);
     ssfs.is_mounted = 0;
+    memset(block_used, 0, sizeof(block_used));
 
     return 0;
 }
@@ -156,7 +189,7 @@ int delete(int inode_num) {
     uint8_t inode_block[BLOCK_SIZE];
     uint8_t *inode = get_inode(inode_num, inode_block);
     if (!inode || inode[0] == 0)
-        return -1;
+        return fs_EREAD;
 
     // Direct pointers
     for (int i = 0; i < 4; i++) {
@@ -216,7 +249,7 @@ int read(int inode_num, uint8_t *data, int len, int offset)
         uint32_t data_block_num = 0;
 
         // Direct blocks
-        if (file_block_index < 4) {
+        if (file_block_index < DIRECT_BLOCK) {
             memcpy(&data_block_num, inode + INODE_DIRECT_OFFSET + 4 * file_block_index, sizeof(uint32_t));
         } 
 
@@ -228,7 +261,7 @@ int read(int inode_num, uint8_t *data, int len, int offset)
 
             uint8_t indirect_block[BLOCK_SIZE];
             if (vdisk_read(&ssfs.disk, indirect1, indirect_block) != 0)
-                return -1;
+                return fs_EREAD;
 
             memcpy(&data_block_num, indirect_block + 4 * (file_block_index - 4), sizeof(uint32_t));
         
@@ -242,9 +275,9 @@ int read(int inode_num, uint8_t *data, int len, int offset)
 
             uint8_t indirect2_block[BLOCK_SIZE];
             if (vdisk_read(&ssfs.disk, indirect2, indirect2_block) != 0)
-                return -1;
+                return fs_EREAD;
 
-            int idx = file_block_index - BLOCK_POINTERS_SIZE + 4;
+            int idx = file_block_index - (BLOCK_POINTERS_SIZE + DIRECT_BLOCK);
             int first_level = idx / BLOCK_POINTERS_SIZE;
             int second_level = idx % BLOCK_POINTERS_SIZE;
 
@@ -254,14 +287,21 @@ int read(int inode_num, uint8_t *data, int len, int offset)
 
             uint8_t intermediate_block[BLOCK_SIZE];
             if (vdisk_read(&ssfs.disk, intermediate_block_num, intermediate_block) != 0)
-                return -1;
+                return fs_EREAD;
 
             memcpy(&data_block_num, intermediate_block + 4 * second_level, sizeof(uint32_t));
         }
 
-        if (data_block_num == 0)
-            break;
-
+        if (data_block_num == 0) {
+            int chunk = (BLOCK_SIZE - inner_offset < bytes_to_read - bytes_read)
+                      ? BLOCK_SIZE - inner_offset
+                      : bytes_to_read - bytes_read;
+            memset(data + bytes_read, 0, chunk); // simulate sparse
+            bytes_read += chunk;
+            current_offset += chunk;
+            continue;
+        }
+        
         uint8_t data_block[BLOCK_SIZE];
         if (vdisk_read(&ssfs.disk, data_block_num, data_block) != 0)
             break;
@@ -297,7 +337,7 @@ int write(int inode_num, uint8_t *data, int len, int offset)
     uint8_t inode_block[BLOCK_SIZE];
     uint8_t *inode = get_inode(inode_num, inode_block);
     if (!inode || inode[0] != INODE_VALID)
-        return -1;
+        return fs_EREAD;
 
     uint32_t file_size;
     memcpy(&file_size, inode + INODE_SIZE_OFFSET, sizeof(uint32_t));
@@ -315,7 +355,7 @@ int write(int inode_num, uint8_t *data, int len, int offset)
         uint8_t inner_indirect_block[BLOCK_SIZE];
 
         // Case 1: Direct blocks
-        if (file_block_index < 4) {
+        if (file_block_index < DIRECT_BLOCK) {
             data_block_ptr = (uint32_t *)(inode + INODE_DIRECT_OFFSET + 4 * file_block_index);
         }
 
@@ -324,18 +364,18 @@ int write(int inode_num, uint8_t *data, int len, int offset)
             uint32_t *indirect_ptr = (uint32_t *)(inode + INODE_INDIRECT1_OFFSET);
             if (*indirect_ptr == 0) {
                 *indirect_ptr = allocate_block();
-                if (*indirect_ptr == 0) return -1;
+                if (*indirect_ptr == 0) return fs_EWRITE;
             }
 
             if (vdisk_read(&ssfs.disk, *indirect_ptr, indirect_block) != 0)
-                return -1;
+                return fs_EREAD;
 
             data_block_ptr = (uint32_t *)(indirect_block + 4 * (file_block_index - 4));
         }
 
         // Case 3: Indirect 2
         else {
-            int idx = file_block_index - BLOCK_POINTERS_SIZE + 4;
+            int idx = file_block_index - (BLOCK_POINTERS_SIZE + 4);
             int outer = idx / BLOCK_POINTERS_SIZE;
             int inner = idx % BLOCK_POINTERS_SIZE;
 
@@ -346,17 +386,18 @@ int write(int inode_num, uint8_t *data, int len, int offset)
             }
 
             if (vdisk_read(&ssfs.disk, *indirect2_ptr, dbl_indirect_block) != 0)
-                return -1;
+                return fs_EREAD;
 
             uint32_t *intermediate_ptr = (uint32_t *)(dbl_indirect_block + 4 * outer);
             if (*intermediate_ptr == 0) {
                 *intermediate_ptr = allocate_block();
                 if (*intermediate_ptr == 0) return -1;
-                vdisk_write(&ssfs.disk, *indirect2_ptr, dbl_indirect_block);
+                if(vdisk_write(&ssfs.disk, *indirect2_ptr, dbl_indirect_block) != 0)
+                    return fs_EWRITE;
             }
 
             if (vdisk_read(&ssfs.disk, *intermediate_ptr, inner_indirect_block) != 0)
-                return -1;
+                return fs_EREAD;
 
             data_block_ptr = (uint32_t *)(inner_indirect_block + 4 * inner);
         }
@@ -364,30 +405,42 @@ int write(int inode_num, uint8_t *data, int len, int offset)
         // Allocate data block if needed
         if (*data_block_ptr == 0) {
             *data_block_ptr = allocate_block();
-            if (*data_block_ptr == 0) return -1;
-
-            // Write updated indirect pointer if needed
-            if (file_block_index >= 4 && file_block_index < BLOCK_POINTERS_SIZE + 4)
-                vdisk_write(&ssfs.disk, *(uint32_t *)(inode + INODE_INDIRECT1_OFFSET), indirect_block);
-            else if (file_block_index >= BLOCK_POINTERS_SIZE + 4) {
-                int outer = (file_block_index - BLOCK_POINTERS_SIZE + 4) / BLOCK_POINTERS_SIZE;
-                uint32_t *indirect2_ptr = (uint32_t *)(inode + INODE_INDIRECT2_OFFSET);
-                uint32_t *intermediate_ptr = (uint32_t *)(dbl_indirect_block + 4 * outer);
-                vdisk_write(&ssfs.disk, *intermediate_ptr, inner_indirect_block);
-                vdisk_write(&ssfs.disk, *indirect2_ptr, dbl_indirect_block);
-            }
+            if (*data_block_ptr == 0) return fs_EWRITE;
         }
 
         // Write actual data
         uint8_t data_block[BLOCK_SIZE];
-        vdisk_read(&ssfs.disk, *data_block_ptr, data_block);
+        if(vdisk_read(&ssfs.disk, *data_block_ptr, data_block) != 0)
+            return -1;
 
         int bytes_available = BLOCK_SIZE - inner_offset;
         int bytes_remaining = len - bytes_written;
         int chunk = (bytes_available < bytes_remaining) ? bytes_available : bytes_remaining;
 
         memcpy(data_block + inner_offset, data + bytes_written, chunk);
-        vdisk_write(&ssfs.disk, *data_block_ptr, data_block);
+        if(vdisk_write(&ssfs.disk, *data_block_ptr, data_block) != 0)
+            return fs_EWRITE;
+        
+        // Write back modified pointer block if indirect
+        if (file_block_index >= 4 && file_block_index < BLOCK_POINTERS_SIZE + 4) {
+            // Indirect1
+            uint32_t indirect1 = *(uint32_t *)(inode + INODE_INDIRECT1_OFFSET);
+            if (vdisk_write(&ssfs.disk, indirect1, indirect_block) != 0)
+                return fs_EWRITE;
+        }
+        else if (file_block_index >= BLOCK_POINTERS_SIZE + 4) {
+            // Indirect2
+            int idx = file_block_index - (BLOCK_POINTERS_SIZE + 4);
+            int outer = idx / BLOCK_POINTERS_SIZE;
+
+            uint32_t *indirect2_ptr = (uint32_t *)(inode + INODE_INDIRECT2_OFFSET);
+            uint32_t *intermediate_ptr = (uint32_t *)(dbl_indirect_block + 4 * outer);
+
+            if (vdisk_write(&ssfs.disk, *intermediate_ptr, inner_indirect_block) != 0)
+                return fs_EWRITE;
+            if (vdisk_write(&ssfs.disk, *indirect2_ptr, dbl_indirect_block) != 0)
+                return fs_EWRITE;
+        }
 
         bytes_written += chunk;
         current_offset += chunk;
@@ -396,14 +449,13 @@ int write(int inode_num, uint8_t *data, int len, int offset)
     // Update file size if needed
     uint32_t new_size = offset + bytes_written;
     if (new_size > file_size) {
-        memcpy(inode + 4, &new_size, sizeof(uint32_t));
+        memcpy(inode + INODE_SIZE_OFFSET, &new_size, sizeof(uint32_t));
     }
 
     // Save updated inode block
     int block_num = ssfs.inode_start_block + (inode_num / INODES_PER_BLOCK);
     return vdisk_write(&ssfs.disk, block_num, inode_block) == 0 ? bytes_written : -1;
 }
-
 
 int create()
 {
@@ -414,7 +466,7 @@ int create()
         uint8_t block[BLOCK_SIZE];
         uint8_t *inode = get_inode(inode_num, block);
         if (!inode)
-            return -1;
+            return fs_EREAD;
 
         if (inode[INODE_STATUT] != INODE_VALID) {
             inode[INODE_STATUT] = (uint8_t)INODE_VALID;
@@ -423,7 +475,7 @@ int create()
             int block_index = inode_num / INODES_PER_BLOCK;
             int block_num = ssfs.inode_start_block + block_index;
             if (vdisk_write(&ssfs.disk, block_num, block) != 0)
-                return -1;
+                return fs_EWRITE;
 
             return inode_num;
         }
@@ -463,21 +515,34 @@ static int free_block(uint32_t block_num)
 
 /// @brief Allocates a free block by writing zeros to it.
 /// @return The block number of the allocated block, or 0 if no free block is found.
-static uint32_t allocate_block() 
-{
+uint32_t allocate_block() {
     uint8_t block[BLOCK_SIZE];
-    for (uint32_t i = ssfs.data_start_block; i < ssfs.superblock.nb_blocks; i++) {
-        if (vdisk_read(&ssfs.disk, i, block) != 0) continue;
-        if (memcmp(block, "\0", 1) == 0) {
-            memset(block, 0, BLOCK_SIZE);
-            vdisk_write(&ssfs.disk, i, block);
+
+    for (uint32_t i = ssfs.data_start_block; i < ssfs.superblock.nb_blocks; ++i) {
+        if (block_used[i]) continue;
+
+        if (vdisk_read(&ssfs.disk, i, block) != 0) {
+            fprintf(stderr, "vdisk_read failed on block %u\n", i);
+            return 0;
+        }
+
+        int is_free = 1;
+        for (int j = 0; j < BLOCK_SIZE; ++j) {
+            if (block[j] != 0) {
+                is_free = 0;
+                break;
+            }
+        }
+
+        if (is_free) {
+            block_used[i] = 1;
             return i;
         }
     }
-    printf("No free block available!\n"); // No free block found
+
+    printf("No free block available!\n");
     return 0;
 }
-
 
 /// @brief Clears an indirect1 block by freeing all its data blocks.
 /// @param block_num 
@@ -509,6 +574,101 @@ static void clear_double_indirect_block(uint32_t block_num)
         }
     }
     free_block(block_num);
+}
+
+/// @brief Gets the size of the virtual disk.
+/// @param disk 
+/// @return The size of the disk in blocks.
+static uint32_t get_vdisk_size(DISK *disk) {
+    long current = ftell(disk->fp);
+    fseek(disk->fp, 0, SEEK_END);
+    long size_bytes = ftell(disk->fp);
+    fseek(disk->fp, current, SEEK_SET); // Restore original position
+    return (uint32_t)(size_bytes / BLOCK_SIZE);
+}
+
+/// @brief Marks a block as used.
+/// @param block_num 
+static void mark_block_used(uint32_t block_num) {
+    if (block_num < MAX_BLOCKS)
+        block_used[block_num] = 1;
+}
+
+/// @brief Marks all blocks in an indirect block as used.
+/// @param block_num 
+static void mark_indirect_blocks(uint32_t block_num) {
+    mark_block_used(block_num);
+
+    uint8_t block[BLOCK_SIZE];
+    if (vdisk_read(&ssfs.disk, block_num, block) != 0)
+        return;
+
+    for (int i = 0; i < BLOCK_POINTERS_SIZE; ++i) {
+        uint32_t ptr;
+        memcpy(&ptr, block + i * 4, sizeof(uint32_t));
+        if (ptr != 0)
+            mark_block_used(ptr);
+    }
+}
+
+/// @brief Marks all blocks in a double indirect block as used.
+/// @param block_num 
+static void mark_double_indirect_blocks(uint32_t block_num) {
+    mark_block_used(block_num);
+
+    uint8_t outer[BLOCK_SIZE];
+    if (vdisk_read(&ssfs.disk, block_num, outer) != 0)
+        return;
+
+    for (int i = 0; i < BLOCK_POINTERS_SIZE; ++i) {
+        uint32_t intermediate;
+        memcpy(&intermediate, outer + i * 4, sizeof(uint32_t));
+        if (intermediate == 0) continue;
+
+        mark_block_used(intermediate);
+
+        uint8_t inner[BLOCK_SIZE];
+        if (vdisk_read(&ssfs.disk, intermediate, inner) != 0)
+            continue;
+
+        for (int j = 0; j < BLOCK_POINTERS_SIZE; ++j) {
+            uint32_t data_ptr;
+            memcpy(&data_ptr, inner + j * 4, sizeof(uint32_t));
+            if (data_ptr != 0)
+                mark_block_used(data_ptr);
+        }
+    }
+}
+
+/// @brief Rebuilds the block usage information from inodes.
+/// @note This should be called after mounting the disk to ensure that all blocks are marked as used or free.
+static void rebuild_block_usage_from_inodes() {
+    uint8_t inode_block[BLOCK_SIZE];
+    for (uint32_t inode_num = 0; inode_num < ssfs.nb_inodes; ++inode_num) {
+        uint8_t *inode = get_inode(inode_num, inode_block);
+        if (!inode || inode[INODE_STATUT] != INODE_VALID)
+            continue;
+
+        // Direct
+        for (int i = 0; i < DIRECT_BLOCK; ++i) {
+            uint32_t ptr;
+            memcpy(&ptr, inode + INODE_DIRECT_OFFSET + i * 4, sizeof(uint32_t));
+            if (ptr != 0)
+                mark_block_used(ptr);
+        }
+
+        // Indirect1
+        uint32_t indirect1;
+        memcpy(&indirect1, inode + INODE_INDIRECT1_OFFSET, sizeof(uint32_t));
+        if (indirect1 != 0)
+            mark_indirect_blocks(indirect1);
+
+        // Indirect2
+        uint32_t indirect2;
+        memcpy(&indirect2, inode + INODE_INDIRECT2_OFFSET, sizeof(uint32_t));
+        if (indirect2 != 0)
+            mark_double_indirect_blocks(indirect2);
+    }
 }
 
 

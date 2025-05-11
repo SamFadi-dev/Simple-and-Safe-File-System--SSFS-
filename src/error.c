@@ -3,3 +3,6 @@ const int vdisk_EACCESS  = -2;
 const int vdisk_ENOEXIST = -3;
 const int vdisk_EEXCEED  = -4;
 const int vdisk_ESECTOR  = -5;
+const int fs_EWRITE      = -6;
+const int fs_ESYNC       = -7;
+const int fs_EREAD       = -8;
