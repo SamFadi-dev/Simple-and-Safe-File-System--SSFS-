@@ -6,3 +6,5 @@ const int vdisk_ESECTOR  = -5;
 const int fs_EWRITE      = -6;
 const int fs_ESYNC       = -7;
 const int fs_EREAD       = -8;
+const int fs_EON         = -9;
+const int fs_EMOUNT      = -10;

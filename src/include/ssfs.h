@@ -20,10 +20,10 @@ typedef struct {
 
 /// @brief SSFS file system structure
 typedef struct {
-    DISK disk; // The virtual disk
-    int is_mounted; // 1 if the disk is mounted, 0 otherwise
-    SuperBlock superblock; // The superblock
-    uint32_t nb_inodes; // Number of inodes
+    DISK disk;                  // The virtual disk
+    int is_mounted;             // 1 if the disk is mounted, 0 otherwise
+    SuperBlock superblock;      // The superblock
+    uint32_t nb_inodes;         // Number of inodes
     uint32_t inode_start_block; // The block number where the inodes start
     uint32_t data_start_block;  // The block number where the data starts
 } SSFS;
